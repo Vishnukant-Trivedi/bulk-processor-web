@@ -1,0 +1,8 @@
+.pycache/
+.pytest_cache/
+*.pyc
+*.sqlite3
+*.db
+data/
+test_hospital_bulk.db
+

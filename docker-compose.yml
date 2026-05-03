@@ -1,0 +1,9 @@
+services:
+  web:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      HOSPITAL_API_BASE_URL: https://hospital-directory.onrender.com
+      RUN_BACKGROUND_WORKER: "true"
+    ports:
+      - "8000:8000"
