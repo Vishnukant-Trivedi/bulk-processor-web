@@ -50,6 +50,40 @@ The system exists to make bulk ingestion safer, faster, and easier to operate th
    - On resume, only failed rows are reset to `pending` and retried.
    - Invalid and duplicate rows remain unchanged.
 
+## Batch Lifecycle
+
+### Job states
+
+- `queued`: batch accepted and waiting for worker execution.
+- `processing`: worker is actively creating rows upstream.
+- `completed`: all rows were resolved successfully or skipped as duplicates, and activation succeeded.
+- `completed_with_errors`: at least one row failed validation or upstream create, or activation failed after successful creation.
+
+### Row states
+
+- `pending`: not yet processed, or reset for retry.
+- `created`: upstream create succeeded, activation not yet reflected in the row.
+- `created_and_activated`: row was created and the batch activation succeeded.
+- `failed`: upstream create failed.
+- `invalid`: local CSV validation failed for the row.
+- `duplicate_in_job`: duplicate within the same upload.
+- `duplicate_existing`: duplicate of a hospital already created in the current runtime state.
+
+### Transition rules
+
+- Only `failed` rows are reset to `pending` during resume.
+- `invalid` and duplicate rows are terminal and are never retried.
+- Batch activation is attempted when at least one row is created.
+- If activation succeeds, created rows are marked `created_and_activated`.
+- If no rows are created, activation is skipped.
+
+### All-negative batch outcomes
+
+- All rows invalid: batch finishes as `completed_with_errors`.
+- All rows failed upstream: batch finishes as `completed_with_errors`.
+- All rows duplicate and no creates occur: batch finishes as `completed`.
+- Mixed results: created rows still trigger activation; the batch may still end as `completed_with_errors` if failures remain.
+
 ## System Architecture
 
 ### API Service
@@ -115,6 +149,18 @@ These metrics should be measured per batch and aggregated over time to detect up
 - Activation failures: if activation fails after row creation, the batch remains visible as `completed_with_errors` and the created hospitals are not rolled back automatically.
 - Resume behavior: `POST /hospitals/bulk/{batch_id}/resume` resets failed rows to `pending` and reprocesses them; completed batches are not resumed.
 - Idempotency behavior: already-created rows are not recreated on resume, and duplicate detection prevents repeated work within the current runtime state.
+
+## Testing & Verification
+
+The codebase includes async tests that exercise the key flows:
+
+- CSV validation rejects missing required columns.
+- Bulk ingestion deduplicates repeated rows and activates the batch.
+- Activation still occurs when some rows fail, as long as there is at least one created row.
+- Resume moves failed rows back to `pending`.
+- Resume retries failed rows successfully when the upstream failure is transient.
+
+These tests provide coverage for validation, dedupe, partial failure handling, activation semantics, and retry behavior.
 
 ## Scalability Considerations
 
