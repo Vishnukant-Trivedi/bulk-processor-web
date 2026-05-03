@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import AsyncGenerator, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -17,6 +18,7 @@ from app.services.bulk import BulkJobService
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def get_service() -> BulkJobService:
@@ -36,6 +38,14 @@ async def bulk_create_hospitals(
 ):
     job, validation, response = await service.ingest_upload(file, wait_for_completion=wait)
     if not validation.valid:
+        logger.info(
+            "bulk_request_validation_failed",
+            extra={
+                "event": "bulk_request_validation_failed",
+                "upload_filename": file.filename or "upload.csv",
+                "issue_count": len(validation.issues),
+            },
+        )
         raise HTTPException(
             status_code=422,
             detail={
@@ -45,9 +55,26 @@ async def bulk_create_hospitals(
         )
 
     if response is not None:
+        logger.info(
+            "bulk_request_completed",
+            extra={
+                "event": "bulk_request_completed",
+                "batch_id": response.batch_id,
+                "status": response.status,
+                "batch_activated": response.batch_activated,
+            },
+        )
         return response
 
     status = service.get_job_status(job.batch_id)
+    logger.info(
+        "bulk_request_accepted",
+        extra={
+            "event": "bulk_request_accepted",
+            "batch_id": job.batch_id,
+            "status": status.status,
+        },
+    )
     return JSONResponse(
         status_code=202,
         content={
@@ -71,13 +98,33 @@ async def validate_csv(
     service: BulkJobService = Depends(get_service),
 ):
     data = await file.read()
-    return service.validate_csv_bytes(data, strict_rows=True)
+    validation = service.validate_csv_bytes(data, strict_rows=True)
+    logger.info(
+        "bulk_csv_validated",
+        extra={
+            "event": "bulk_csv_validated",
+            "upload_filename": file.filename or "upload.csv",
+            "valid": validation.valid,
+            "total_rows": validation.total_rows,
+            "issue_count": len(validation.issues),
+        },
+    )
+    return validation
 
 
 @router.get("/hospitals/bulk/{batch_id}", response_model=BulkJobStatusResponse)
 def bulk_status(batch_id: str, service: BulkJobService = Depends(get_service)):
     try:
-        return service.get_job_status(batch_id)
+        status = service.get_job_status(batch_id)
+        logger.info(
+            "bulk_status_read",
+            extra={
+                "event": "bulk_status_read",
+                "batch_id": batch_id,
+                "status": status.status,
+            },
+        )
+        return status
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -85,7 +132,17 @@ def bulk_status(batch_id: str, service: BulkJobService = Depends(get_service)):
 @router.post("/hospitals/bulk/{batch_id}/resume", response_model=ResumeResponse)
 async def resume_bulk(batch_id: str, service: BulkJobService = Depends(get_service)):
     try:
-        return service.resume_job(batch_id)
+        result = service.resume_job(batch_id)
+        logger.info(
+            "bulk_resume_requested",
+            extra={
+                "event": "bulk_resume_requested",
+                "batch_id": batch_id,
+                "resumed": result.resumed,
+                "status": result.status,
+            },
+        )
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -98,7 +155,18 @@ def bulk_rows(
     service: BulkJobService = Depends(get_service),
 ):
     try:
-        return {"batch_id": batch_id, "rows": [row.model_dump() for row in service.list_job_rows(batch_id, limit=limit, offset=offset)]}
+        rows = service.list_job_rows(batch_id, limit=limit, offset=offset)
+        logger.info(
+            "bulk_rows_read",
+            extra={
+                "event": "bulk_rows_read",
+                "batch_id": batch_id,
+                "row_count": len(rows),
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        return {"batch_id": batch_id, "rows": [row.model_dump() for row in rows]}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

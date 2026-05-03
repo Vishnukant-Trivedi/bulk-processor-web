@@ -50,7 +50,7 @@ The system exists to make bulk ingestion safer, faster, and easier to operate th
    - On resume, only failed rows are reset to `pending` and retried.
    - Invalid and duplicate rows remain unchanged.
 
-## Batch Lifecycle
+## Batch State Machine
 
 ### Job states
 
@@ -58,6 +58,16 @@ The system exists to make bulk ingestion safer, faster, and easier to operate th
 - `processing`: worker is actively creating rows upstream.
 - `completed`: all rows were resolved successfully or skipped as duplicates, and activation succeeded.
 - `completed_with_errors`: at least one row failed validation or upstream create, or activation failed after successful creation.
+
+### State transitions
+
+| From | To | Trigger |
+| --- | --- | --- |
+| `queued` | `processing` | Worker claims the batch |
+| `processing` | `completed` | All created rows activate successfully and no failures remain |
+| `processing` | `completed_with_errors` | Validation failure, upstream create failure, or activation failure |
+| `completed_with_errors` | `queued` | Resume finds retryable failed rows or a created batch that still needs activation |
+| `completed` | `completed` | Resume is a no-op |
 
 ### Row states
 
@@ -166,6 +176,7 @@ These metrics should be measured per batch and aggregated over time to detect up
 The codebase includes async tests that exercise the key flows:
 
 - CSV validation rejects missing required columns.
+- API integration tests cover validation, bulk upload, status lookup, row lookup, SSE completion, and resume flow.
 - Bulk ingestion deduplicates repeated rows and activates the batch.
 - Activation still occurs when some rows fail, as long as there is at least one created row.
 - Resume moves failed rows back to `pending`.
@@ -277,7 +288,7 @@ Resets failed rows to `pending` and retries the batch work.
 
 ## Observability
 
-- Logs should include `batch_id`, row number, row status, upstream latency, and failure cause.
+- Logs are structured JSON and include fields such as `batch_id`, row number, row status, upstream latency, and failure cause.
 - Metrics should track upload acceptance, validation failures, row-level success and failure counts, duplicate rate, activation success rate, queue depth, retry recovery, and terminal batch latency.
 - Tracing should connect upload request, worker execution, and upstream API calls using `batch_id` as the primary correlation key.
 

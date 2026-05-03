@@ -6,9 +6,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api import router
+from app.core.logging import configure_logging
 from app.core.settings import settings
 from app.services.bulk import BulkJobService
 from app.services.worker import run_worker
+
+
+configure_logging()
 
 
 @asynccontextmanager

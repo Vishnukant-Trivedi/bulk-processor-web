@@ -19,10 +19,13 @@ async def run_worker(service: Optional[BulkJobService] = None) -> None:
             if not batch_id:
                 await asyncio.sleep(settings.worker_poll_seconds)
                 continue
-            logger.info("Processing batch %s", batch_id)
+            logger.info(
+                "bulk_worker_claimed_batch",
+                extra={"event": "bulk_worker_claimed_batch", "batch_id": batch_id},
+            )
             await service.process_job(batch_id, collect_results=False)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("Worker loop error")
+            logger.exception("bulk_worker_loop_error", extra={"event": "bulk_worker_loop_error"})
             await asyncio.sleep(settings.worker_poll_seconds)

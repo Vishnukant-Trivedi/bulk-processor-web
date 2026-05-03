@@ -4,6 +4,7 @@ import asyncio
 import csv
 import hashlib
 import io
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,9 @@ from app.schemas import (
 from app.services.normalization import build_dedupe_key, normalize_row, row_to_payload
 from app.services.store import STORE, JobRecord, RowRecord, new_batch_id
 from app.services.upstream import HospitalDirectoryClient, UpstreamAPIError
+
+
+logger = logging.getLogger(__name__)
 
 
 MAX_HOSPITALS_PER_CSV = 20
@@ -48,6 +52,16 @@ class BulkJobService:
     ) -> Tuple[Optional[JobRecord], CSVValidationResponse, Optional[BulkProcessingResponse]]:
         data = await upload.read()
         validation, parsed_rows = self._parse_csv_bytes(data, strict_rows=False)
+        logger.info(
+            "bulk_upload_validated",
+            extra={
+                "event": "bulk_upload_validated",
+                "upload_filename": upload.filename or "upload.csv",
+                "total_rows": validation.total_rows,
+                "valid": validation.valid,
+                "issue_count": len(validation.issues),
+            },
+        )
         if not validation.valid:
             return None, validation, None
 
@@ -61,6 +75,15 @@ class BulkJobService:
                 raw_rows=parsed_rows,
                 chunk_size=max(1, settings.bulk_chunk_size),
             )
+        logger.info(
+            "bulk_job_created",
+            extra={
+                "event": "bulk_job_created",
+                "batch_id": batch_id,
+                "upload_filename": upload.filename or "upload.csv",
+                "total_rows": validation.total_rows,
+            },
+        )
 
         job = self.store.get_job(batch_id)
         if job is None:
@@ -97,6 +120,7 @@ class BulkJobService:
                 return self._response_for_job(batch_id, [], started)
             job.status = "processing"
             job.touch()
+        logger.info("bulk_job_processing_started", extra={"event": "bulk_job_processing_started", "batch_id": batch_id})
 
         raw_rows = list(job.raw_rows)
         pending_rows = [
@@ -118,9 +142,9 @@ class BulkJobService:
                         hospital_id=item.hospital_id,
                         name=item.name,
                         status=item.status,
-                    )
-                    for item in processed
                 )
+                for item in processed
+            )
 
         job_summary = self.store.summarize_job(batch_id)
         if job_summary is None:
@@ -130,6 +154,15 @@ class BulkJobService:
         if should_activate:
             try:
                 await self.upstream_client.activate_batch(batch_id)
+                logger.info(
+                    "bulk_batch_activation_succeeded",
+                    extra={
+                        "event": "bulk_batch_activation_succeeded",
+                        "batch_id": batch_id,
+                        "created_rows": job_summary["created_rows"],
+                        "failed_rows": job_summary["failed_rows"],
+                    },
+                )
                 with self.store.lock:
                     current = self.store.get_job(batch_id)
                     if current is not None:
@@ -148,6 +181,13 @@ class BulkJobService:
                         if result.status == "created":
                             result.status = "created_and_activated"
             except Exception as exc:
+                logger.exception(
+                    "bulk_batch_activation_failed",
+                    extra={
+                        "event": "bulk_batch_activation_failed",
+                        "batch_id": batch_id,
+                    },
+                )
                 with self.store.lock:
                     current = self.store.get_job(batch_id)
                     if current is not None:
@@ -190,6 +230,16 @@ class BulkJobService:
             job.status = "queued"
             job.error_message = None
             job.touch()
+        logger.info(
+            "bulk_job_resumed",
+            extra={
+                "event": "bulk_job_resumed",
+                "batch_id": batch_id,
+                "resumed": True,
+                "retryable_failures": has_retryable_failures,
+                "needs_activation_retry": needs_activation_retry,
+            },
+        )
         return ResumeResponse(batch_id=batch_id, status="queued", resumed=True)
 
     def list_job_rows(
@@ -237,12 +287,29 @@ class BulkJobService:
                 row.status = "invalid"
                 row.message = message
                 job.touch()
+            logger.info(
+                "bulk_row_invalid",
+                extra={
+                    "event": "bulk_row_invalid",
+                    "batch_id": batch_id,
+                    "row": row_number,
+                    "error_message": message,
+                },
+            )
             return row
 
         with self.store.lock:
             if dedupe_key in job.in_progress_dedupe_keys:
                 row.status = "duplicate_in_job"
                 row.message = "Duplicate row in the same upload"
+                logger.info(
+                    "bulk_row_duplicate_in_job",
+                    extra={
+                        "event": "bulk_row_duplicate_in_job",
+                        "batch_id": batch_id,
+                        "row": row_number,
+                    },
+                )
                 return row
 
             existing = self.store.ledger.get(dedupe_key)
@@ -253,6 +320,15 @@ class BulkJobService:
                     "Duplicate row in the same upload"
                     if existing.batch_id == batch_id
                     else "Duplicate of an already created hospital"
+                )
+                logger.info(
+                    "bulk_row_duplicate_existing",
+                    extra={
+                        "event": "bulk_row_duplicate_existing",
+                        "batch_id": batch_id,
+                        "row": row_number,
+                        "existing_batch_id": existing.batch_id,
+                    },
                 )
                 return row
 
@@ -277,6 +353,15 @@ class BulkJobService:
                 self.store.ledger[dedupe_key].active = False
                 job.in_progress_dedupe_keys.discard(dedupe_key)
                 job.touch()
+            logger.info(
+                "bulk_row_created",
+                extra={
+                    "event": "bulk_row_created",
+                    "batch_id": batch_id,
+                    "row": row_number,
+                    "hospital_id": int(hospital_id),
+                },
+            )
             return row
         except Exception as exc:
             with self.store.lock:
@@ -284,6 +369,14 @@ class BulkJobService:
                 row.message = str(exc)
                 job.in_progress_dedupe_keys.discard(dedupe_key)
                 job.touch()
+            logger.exception(
+                "bulk_row_create_failed",
+                extra={
+                    "event": "bulk_row_create_failed",
+                    "batch_id": batch_id,
+                    "row": row_number,
+                },
+            )
             return row
 
     def _make_ledger_entry(
