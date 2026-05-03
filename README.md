@@ -73,6 +73,7 @@ The system exists to make bulk ingestion safer, faster, and easier to operate th
 
 - Only `failed` rows are reset to `pending` during resume.
 - `invalid` and duplicate rows are terminal and are never retried.
+- `resume` only queues work when there is retryable state to process: a failed row or a created row that still needs activation.
 - Batch activation is attempted when at least one row is created.
 - If activation succeeds, created rows are marked `created_and_activated`.
 - If no rows are created, activation is skipped.
@@ -83,6 +84,16 @@ The system exists to make bulk ingestion safer, faster, and easier to operate th
 - All rows failed upstream: batch finishes as `completed_with_errors`.
 - All rows duplicate and no creates occur: batch finishes as `completed`.
 - Mixed results: created rows still trigger activation; the batch may still end as `completed_with_errors` if failures remain.
+
+### Outcome matrix
+
+| Input shape | Batch status | Activation | Resume behavior |
+| --- | --- | --- | --- |
+| All valid and unique | `completed` | Yes | No-op after completion |
+| Some valid, some failed | `completed_with_errors` | Yes | Retries failed rows |
+| Some valid, some invalid or duplicate | `completed_with_errors` or `completed` | Yes if any row was created | Retries failed rows only |
+| All invalid | `completed_with_errors` | No | No-op |
+| All duplicate existing | `completed` | No | No-op |
 
 ## System Architecture
 
@@ -159,6 +170,9 @@ The codebase includes async tests that exercise the key flows:
 - Activation still occurs when some rows fail, as long as there is at least one created row.
 - Resume moves failed rows back to `pending`.
 - Resume retries failed rows successfully when the upstream failure is transient.
+- All-invalid uploads are rejected before processing.
+- Duplicate-existing-only uploads complete without activation.
+- Activation failures can be retried successfully through resume.
 
 These tests provide coverage for validation, dedupe, partial failure handling, activation semantics, and retry behavior.
 

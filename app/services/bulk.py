@@ -113,14 +113,14 @@ class BulkJobService:
             processed = await asyncio.gather(*tasks)
             if collect_results:
                 row_results.extend(
-                HospitalRowResult(
-                    row=item.row,
-                    hospital_id=item.hospital_id,
-                    name=item.name,
-                    status=item.status,
+                    HospitalRowResult(
+                        row=item.row,
+                        hospital_id=item.hospital_id,
+                        name=item.name,
+                        status=item.status,
+                    )
+                    for item in processed
                 )
-                for item in processed
-            )
 
         job_summary = self.store.summarize_job(batch_id)
         if job_summary is None:
@@ -173,6 +173,13 @@ class BulkJobService:
             if job is None:
                 raise ValueError(f"Unknown batch_id: {batch_id}")
             if job.status == "completed":
+                return ResumeResponse(batch_id=batch_id, status=job.status, resumed=False)
+            has_retryable_failures = any(row.status == "failed" for row in job.rows.values())
+            needs_activation_retry = (
+                job.batch_activated is False
+                and any(row.status == "created" for row in job.rows.values())
+            )
+            if not has_retryable_failures and not needs_activation_retry:
                 return ResumeResponse(batch_id=batch_id, status=job.status, resumed=False)
             for row in job.rows.values():
                 if row.status == "failed":
